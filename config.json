@@ -30,5 +30,47 @@
         }
       ]
     }
+  ],
+  "forwards": [
+    {
+      "source": "/api/v1/test",
+      "target": "/target/1",
+      "convertors": [
+        {
+          "name": "age",
+          "output": {
+            "rmove": false,
+            "type": 2
+          }
+        },
+        {
+          "name": "is_student",
+          "outpt": {
+            "type": 2,
+            "map": [
+              {
+                "from": true,
+                "to": "是"
+              },
+              {
+                "from": false,
+                "to": "是"
+              }
+            ]
+          }
+        },
+        {
+          "name": "age",
+          "output": {
+            "remove": true
+          }
+        }
+      ]
+    },
+    {
+      "source": "/api/v1/test",
+      "target": "/target/2",
+      "all": true
+    }
   ]
 }

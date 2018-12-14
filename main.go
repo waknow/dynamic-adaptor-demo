@@ -95,12 +95,12 @@ func newHandleFunc(method string, args []*Arg, validFuncs map[string]validFunc) 
 			} else {
 				validFunc := validFuncs[arg.Name]
 				if validFunc != nil {
-					if err := validFunc(v); err != nil {
+					if validValue, err := validFunc(v); err != nil {
 						invalid[arg.Name] = fmt.Sprintf("<err: %s>", err.Error())
 						statistic.Inc(fmt.Sprintf("%s.args.invalid", r.RequestURI), 1)
 					} else {
 						statistic.Inc(fmt.Sprintf("%s.args.valid", r.RequestURI), 1)
-						valid[arg.Name] = v
+						valid[arg.Name] = validValue
 					}
 				} else {
 					valid[arg.Name] = v
@@ -174,61 +174,61 @@ func generateValidFunc(arg *Arg) (validFunc, error) {
 	return nil, nil
 }
 
-type validFunc func(v interface{}) error
+type validFunc func(v interface{}) (interface{}, error)
 type stringValidFunc func(s string) error
 type intValidFunc func(i int64) error
 type boolValidFunc func(b bool) error
 
 func newStringTypeValidFunc(validFuncs ...stringValidFunc) validFunc {
-	return func(v interface{}) error {
+	return func(v interface{}) (interface{}, error) {
 		if v == nil {
-			return nil
+			return nil, nil
 		}
 		s, ok := v.(string)
 		if !ok {
-			return fmt.Errorf("not string")
+			return nil, fmt.Errorf("not string")
 		}
 		for _, validFunc := range validFuncs {
 			if err := validFunc(s); err != nil {
-				return err
+				return nil, err
 			}
 		}
-		return nil
+		return s, nil
 	}
 }
 
 func newIntTypeValidFunc(validFuncs ...intValidFunc) validFunc {
-	return func(v interface{}) error {
+	return func(v interface{}) (interface{}, error) {
 		if v == nil {
-			return nil
+			return nil, nil
 		}
 		n, ok := v.(json.Number)
 		if !ok {
-			return fmt.Errorf("not number")
+			return nil, fmt.Errorf("not number")
 		}
 		i, err := n.Int64()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, validFunc := range validFuncs {
 			if err := validFunc(i); err != nil {
-				return err
+				return nil, err
 			}
 		}
-		return nil
+		return i, nil
 	}
 }
 
 func newBoolTypeValidFunc(validFuncs ...boolValidFunc) validFunc {
-	return func(v interface{}) error {
+	return func(v interface{}) (interface{}, error) {
 		if v == nil {
-			return nil
+			return nil, nil
 		}
-		_, ok := v.(bool)
+		b, ok := v.(bool)
 		if !ok {
-			return fmt.Errorf("not bool")
+			return nil, fmt.Errorf("not bool")
 		}
-		return nil
+		return b, nil
 	}
 }
 
@@ -441,3 +441,35 @@ func (s *Statistic) Json() string {
 	}
 	return string(bs)
 }
+
+// type forwardFunc func(srcUri string, valid, invalid interface{})
+
+// func emptyForward(srdUri string, valid, invalid interface{}) {
+// 	return
+// }
+
+// type forwarder struct {
+// 	SrcUri    string
+// 	TargetUrl string
+// 	All       bool
+// }
+
+// func newForwardFunc(forwardConfig interface{}) (forwardFunc, error) {
+// 	configs, ok := forwardConfig.([]interface{})
+// 	if ok {
+// 		return emptyForward, fmt.Errorf("not array")
+// 	}
+// 	for _, config := range configs {
+// 		confMap := config.(map[string]interface{})
+// 		source := confMap["source"]
+// 		target := confMap["target"]
+// 		var all bool
+// 		i, ok := confMap["all"]
+// 		if ok {
+// 			b, ok := i.(bool)
+// 			if ok {
+// 				all = true
+// 			}
+// 		}
+// 	}
+// }
