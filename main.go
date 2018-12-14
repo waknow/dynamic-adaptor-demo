@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 )
 
 func main() {
@@ -31,11 +33,13 @@ func main() {
 	}
 	f.Close()
 
+	http.HandleFunc("/statistics", statisticHandler)
+
 	for _, protocol := range conf.Protocols {
 		log.Println("add", protocol.Method, protocol.Path)
 		validFuncs := map[string]validFunc{}
 		for _, arg := range protocol.Args {
-			validFuncs[arg.Name], err = generateValidFunc(arg.Type, arg.Restrictions)
+			validFuncs[arg.Name], err = generateValidFunc(arg)
 			if err != nil {
 				log.Println("generate arg valid failed", arg.Name, err)
 			}
@@ -48,8 +52,18 @@ func main() {
 	}
 }
 
+var statistic = &Statistic{}
+
+func statisticHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	statistic.Inc(fmt.Sprintf("%s.request", r.RequestURI), 1)
+	fmt.Fprint(w, statistic.Json())
+}
+
 func newHandleFunc(method string, args []*Arg, validFuncs map[string]validFunc) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		statistic.Inc(fmt.Sprintf("%s.request", r.RequestURI), 1)
+		statistic.Inc(fmt.Sprintf("%s.total_size", r.RequestURI), int(r.ContentLength))
 		if method != r.Method {
 			m{
 				"code": Code_Err_Request,
@@ -77,16 +91,20 @@ func newHandleFunc(method string, args []*Arg, validFuncs map[string]validFunc) 
 			v, ok := data[arg.Name]
 			if !ok {
 				invalid[arg.Name] = "<missed>"
+				statistic.Inc(fmt.Sprintf("%s.args.missed", r.RequestURI), 1)
 			} else {
 				validFunc := validFuncs[arg.Name]
 				if validFunc != nil {
 					if err := validFunc(v); err != nil {
 						invalid[arg.Name] = fmt.Sprintf("<err: %s>", err.Error())
+						statistic.Inc(fmt.Sprintf("%s.args.invalid", r.RequestURI), 1)
 					} else {
+						statistic.Inc(fmt.Sprintf("%s.args.valid", r.RequestURI), 1)
 						valid[arg.Name] = v
 					}
 				} else {
 					valid[arg.Name] = v
+					statistic.Inc(fmt.Sprintf("%s.args.valid", r.RequestURI), 1)
 				}
 			}
 		}
@@ -142,33 +160,121 @@ type Arg struct {
 
 type Restrictions map[string]interface{}
 
-func generateValidFunc(argType ArgType, restrictions Restrictions) (validFunc, error) {
-	switch argType {
+func generateValidFunc(arg *Arg) (validFunc, error) {
+	switch arg.Type {
 	case String:
-		return generateStringValidFunc(restrictions)
+		return generateStringValidFunc(arg)
+	case Int:
+		return generateIntValidFunc(arg)
+	case Bool:
+		return generateBoolValidFunc(arg)
 	default:
-		log.Println("argType", argType, "currently not supported")
+		log.Println("arg", arg.Name, "argType", arg.Type, "currently not supported")
 	}
 	return nil, nil
 }
 
-func generateStringValidFunc(restrictions Restrictions) (validFunc, error) {
+type validFunc func(v interface{}) error
+type stringValidFunc func(s string) error
+type intValidFunc func(i int64) error
+type boolValidFunc func(b bool) error
+
+func newStringTypeValidFunc(validFuncs ...stringValidFunc) validFunc {
+	return func(v interface{}) error {
+		if v == nil {
+			return nil
+		}
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("not string")
+		}
+		for _, validFunc := range validFuncs {
+			if err := validFunc(s); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func newIntTypeValidFunc(validFuncs ...intValidFunc) validFunc {
+	return func(v interface{}) error {
+		if v == nil {
+			return nil
+		}
+		n, ok := v.(json.Number)
+		if !ok {
+			return fmt.Errorf("not number")
+		}
+		i, err := n.Int64()
+		if err != nil {
+			return err
+		}
+		for _, validFunc := range validFuncs {
+			if err := validFunc(i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func newBoolTypeValidFunc(validFuncs ...boolValidFunc) validFunc {
+	return func(v interface{}) error {
+		if v == nil {
+			return nil
+		}
+		_, ok := v.(bool)
+		if !ok {
+			return fmt.Errorf("not bool")
+		}
+		return nil
+	}
+}
+
+func generateStringValidFunc(arg *Arg) (validFunc, error) {
 	stringValidFuncs := []stringValidFunc{}
-	for name, restriction := range restrictions {
+	for name, restriction := range arg.Restrictions {
 		switch name {
 		case "length":
 			if validFunc, err := generateStringLengthValidFunc(restriction); err != nil {
 				return nil, err
-			} else {
+			} else if validFunc != nil {
 				stringValidFuncs = append(stringValidFuncs, validFunc)
+			} else {
+				log.Println("valid func for", arg.Name, "of length can not be applied, may max and min not found")
 			}
 		default:
-			log.Println("valid", name, "currently not suppored")
+			log.Println("arg", arg.Name, "restriction of", name, "currently not suppored")
 		}
 	}
 	return newStringTypeValidFunc(stringValidFuncs...), nil
 }
 
+func generateIntValidFunc(arg *Arg) (validFunc, error) {
+	intValidFuncs := []intValidFunc{}
+	for name, restriction := range arg.Restrictions {
+		switch name {
+		case "range":
+			if validFunc, err := generateIntRangeValidFunc(restriction); err != nil {
+				return nil, err
+			} else if validFunc != nil {
+				intValidFuncs = append(intValidFuncs, validFunc)
+			} else {
+				log.Println("valid func for", arg.Name, "of length can not be applied, may max and min not found")
+			}
+		default:
+			log.Println("arg", arg.Name, "restriction of", name, "currently not suppored")
+		}
+	}
+	return newIntTypeValidFunc(intValidFuncs...), nil
+}
+
+func generateBoolValidFunc(arg *Arg) (validFunc, error) {
+	return newBoolTypeValidFunc(), nil
+}
+
+//string length
 func generateStringLengthValidFunc(restriction interface{}) (stringValidFunc, error) {
 	if restriction == nil {
 		return nil, nil
@@ -221,32 +327,117 @@ func generateStringLengthValidFunc(restriction interface{}) (stringValidFunc, er
 	return nil, nil
 }
 
-type validFunc func(v interface{}) error
-type stringValidFunc func(s string) error
-type intValidFunc func(i int64) error
-
-type stringTypeValidFunc func(validFuncs ...stringValidFunc) validFunc
-type stringMaxLengthValidFunc func(max int) stringValidFunc
-
-type intTypeValidFunc func(validFuncs ...intValidFunc) validFunc
-type intMaxValidFunc func(max int64) intValidFunc
-type intMinValidFunc func(min int64) intValidFunc
-type intRangeValidFunc func(min, max int64) intValidFunc
-
-func newStringTypeValidFunc(validFuncs ...stringValidFunc) validFunc {
-	return func(v interface{}) error {
-		if v == nil {
+//int range
+func generateIntRangeValidFunc(restriction interface{}) (intValidFunc, error) {
+	if restriction == nil {
+		return nil, nil
+	}
+	m := restriction.(map[string]interface{})
+	max, maxExisted := m["max"]
+	min, minExisted := m["min"]
+	var maxV, minV int64
+	var err error
+	if maxExisted && minExisted {
+		if maxV, err = (max.(json.Number)).Int64(); err != nil {
+			return nil, err
+		}
+		if minV, err = (min.(json.Number)).Int64(); err != nil {
+			return nil, err
+		}
+		return func(i int64) error {
+			if i < minV {
+				return fmt.Errorf("min: %d, current: %d", minV, i)
+			}
+			if i > maxV {
+				return fmt.Errorf("max: %d, current: %d", maxV, i)
+			}
 			return nil
+		}, nil
+	} else if maxExisted {
+		if maxV, err = (max.(json.Number)).Int64(); err != nil {
+			return nil, err
 		}
-		s, ok := v.(string)
+		return func(i int64) error {
+			if i > maxV {
+				return fmt.Errorf("max: %d, current: %d", maxV, i)
+			}
+			return nil
+		}, nil
+	} else if minExisted {
+		if minV, err = (min.(json.Number)).Int64(); err != nil {
+			return nil, err
+		}
+		return func(i int64) error {
+			if i < minV {
+				return fmt.Errorf("min: %d, current: %d", minV, i)
+			}
+			return nil
+		}, nil
+	}
+	return nil, nil
+}
+
+type Statistic struct {
+	data  map[string]interface{}
+	mutex sync.Mutex
+}
+
+func (s *Statistic) Inc(path string, delta int) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if s.data == nil {
+		s.data = map[string]interface{}{}
+	}
+
+	parts := strings.Split(path, ".")
+	pathParts := parts[:len(parts)-1]
+	valueName := parts[len(parts)-1]
+	// log.Println("pathParts valueName", pathParts, valueName)
+	ok := false
+	cur := s.data
+	var next map[string]interface{}
+	passedParts := []string{}
+	for _, part := range pathParts[:] {
+		passedParts = append(passedParts, part)
+		// log.Println(passedParts, part)
+		i, ok := cur[part]
 		if !ok {
-			return fmt.Errorf("not string")
-		}
-		for _, validFunc := range validFuncs {
-			if err := validFunc(s); err != nil {
-				return err
+			next = map[string]interface{}{}
+			cur[part] = next
+		} else {
+			next, ok = i.(map[string]interface{})
+			if !ok {
+				log.Printf("%v %t", passedParts, i)
+				return fmt.Errorf("%s is a value", strings.Join(passedParts, "."))
 			}
 		}
-		return nil
+		cur = next
 	}
+
+	i := cur[valueName]
+	var value int
+	if i == nil {
+		value = delta
+	} else if value, ok = i.(int); !ok {
+		log.Printf("%v %v", passedParts, i)
+		return fmt.Errorf("not value which you want to inc")
+	} else {
+		value += delta
+	}
+	cur[valueName] = value
+	// log.Println(s.data)
+	// log.Println(cur)
+	return nil
+}
+
+func (s *Statistic) Json() string {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	bs, err := json.Marshal(s.data)
+	if err != nil {
+		panic(err)
+	}
+	return string(bs)
 }
